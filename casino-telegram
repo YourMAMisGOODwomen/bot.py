@@ -1,0 +1,119 @@
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler,
+    CallbackQueryHandler, MessageHandler,
+    ContextTypes, filters
+)
+
+TOKEN = "ТВОЙ_ТОКЕН"
+ADMIN_ID = 123456789
+TON_WALLET = "ТВОЙ_TON_КОШЕЛЁК"
+
+balances = {}
+states = {}
+
+def bal(uid):
+    return round(balances.get(uid, 0), 2)
+
+def add(uid, x):
+    balances[uid] = bal(uid) + x
+
+# ---------- START ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    balances.setdefault(uid, 0)
+
+    kb = [
+        [InlineKeyboardButton("📥 Депозит (TON)", callback_data="deposit")],
+    ]
+
+    await update.message.reply_text(
+        f"💰 Баланс: {bal(uid)} $\n\n"
+        f"💎 Депозит TON на кошелёк:\n{TON_WALLET}",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+# ---------- CALLBACK ----------
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "deposit":
+        states[q.from_user.id] = "deposit_username"
+        await q.message.reply_text("✏️ Напиши свой username (@username):")
+
+# ---------- TEXT ----------
+async def text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    txt = update.message.text
+
+    if states.get(uid) == "deposit_username":
+        context.user_data["dep_user"] = txt
+        states[uid] = "deposit_amount"
+        await update.message.reply_text("💎 Напиши сумму депозита в TON:")
+        return
+
+    if states.get(uid) == "deposit_amount":
+        try:
+            ton = float(txt)
+        except:
+            await update.message.reply_text("❌ Напиши число")
+            return
+
+        user = context.user_data["dep_user"]
+        states.pop(uid)
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"💰 НОВЫЙ ДЕПОЗИТ\n"
+            f"👤 {user}\n"
+            f"💎 {ton} TON\n\n"
+            f"Для начисления:\n"
+            f"/add {user} {ton}"
+        )
+
+        await update.message.reply_text(
+            "✅ Заявка отправлена админу\n"
+            "После оплаты баланс будет начислен"
+        )
+
+# ---------- ADMIN ----------
+async def add_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    try:
+        username = context.args[0]
+        amount = float(context.args[1])
+    except:
+        await update.message.reply_text("❌ Формат: /add @user 10")
+        return
+
+    for uid in balances:
+        if context.bot_data.get(uid) == username:
+            add(uid, amount)
+
+    await update.message.reply_text(
+        f"✅ Начислено {amount} $ пользователю {username}"
+    )
+
+# ---------- SAVE USERNAMES ----------
+async def save_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.bot_data[update.effective_user.id] = (
+        "@" + update.effective_user.username
+        if update.effective_user.username else "без_username"
+    )
+
+# ---------- RUN ----------
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add_money))
+    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(filters.TEXT, text))
+    app.add_handler(MessageHandler(filters.ALL, save_user))
+    print("Бот запущен")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
