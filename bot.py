@@ -1,242 +1,269 @@
+import logging
 import random
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import json
+import asyncio
+from datetime import datetime
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
 
-# ====== НАСТРОЙКИ ======
+# ================== НАСТРОЙКИ ==================
 TOKEN = "7931022784:AAGbxR3Ny8mRsNmA65NWau4-uT-bBmZ2YQU"
 ADMIN_ID = 1403543095
 
-BET_BUTTONS = [0.1, 0.2, 0.5]
+DATA_FILE = "data.json"
 
-# RTP: в тексте "до 89%", фактически ~60-65%
-SOFT_MODE_CHANCE = 0.22  # шанс мягкого режима
-SOFT_SAFE_CLICKS = 2    # только при 3 минах
+TON_TO_USD = 1.7
+STAR_OUT = 0.01 * TON_TO_USD
+STAR_IN = 0.007 * TON_TO_USD
+# ==============================================
 
-# ======================
+logging.basicConfig(level=logging.INFO)
 
-balances = {}
-user_state = {}
-mines_games = {}
+# ---------- Хранилище ----------
+def load_data():
+    try:
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"users": {}, "withdraws": []}
 
-def bal(uid):
-    return round(balances.get(uid, 0.0), 2)
+def save_data():
+    with open(DATA_FILE, "w") as f:
+        json.dump(DB, f, indent=2)
 
-def add(uid, x):
-    balances[uid] = round(bal(uid) + x, 2)
+DB = load_data()
 
-def sub(uid, x):
-    balances[uid] = round(bal(uid) - x, 2)
+def get_user(uid, username):
+    uid = str(uid)
+    if uid not in DB["users"]:
+        DB["users"][uid] = {
+            "username": username,
+            "balance": 0.0,
+            "joined": str(datetime.now())
+        }
+        save_data()
+    return DB["users"][uid]
 
-# ---------- START ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    balances.setdefault(uid, 0.0)
-
-    kb = [
-        [InlineKeyboardButton("🎰 Слоты", callback_data="slots")],
-        [InlineKeyboardButton("🎲 Кубик", callback_data="dice")],
+# ---------- Клавиатуры ----------
+def main_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎰 Слоты", callback_data="slots"),
+         InlineKeyboardButton("🎲 Кубик", callback_data="dice")],
         [InlineKeyboardButton("💣 Mines", callback_data="mines")],
-        [InlineKeyboardButton("💰 Баланс", callback_data="balance")]
-    ]
+        [InlineKeyboardButton("💰 Баланс", callback_data="balance")],
+        [InlineKeyboardButton("➕ Депозит", callback_data="deposit"),
+         InlineKeyboardButton("➖ Вывод", callback_data="withdraw")]
+    ])
+
+# ---------- Команды ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    get_user(user.id, user.username)
     await update.message.reply_text(
-        f"Добро пожаловать!\n🎯 RTP до 89%\n\n💰 Баланс: {bal(uid)} $",
-        reply_markup=InlineKeyboardMarkup(kb)
+        "Добро пожаловать 👋\nВыбери действие:",
+        reply_markup=main_kb()
     )
 
-# ---------- CALLBACK ----------
-async def cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    uid = q.from_user.id
-    await q.answer()
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(update.effective_user.id, update.effective_user.username)
+    await update.callback_query.message.reply_text(
+        f"💰 Баланс: **{user['balance']:.2f}$**",
+        parse_mode="Markdown"
+    )
 
-    # ===== БАЛАНС =====
-    if q.data == "balance":
-        await q.message.reply_text(f"💰 Твой баланс: {bal(uid)} $")
+# ---------- Депозит ----------
+async def deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "➕ **Депозит**\n\n"
+        "Для пополнения напиши админу:\n"
+        "@pashalko_1488\n\n"
+        "Укажи:\n"
+        "• сумму\n"
+        "• свой username\n"
+        "• TON или Stars\n"
+    )
+    await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+
+# ---------- Вывод ----------
+async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.message.reply_text(
+        "➖ Напиши сумму и TON-кошелёк одним сообщением\n\n"
+        "Пример:\n`10 UQxxxxxxx`",
+        parse_mode="Markdown"
+    )
+    context.user_data["wait_withdraw"] = True
+
+async def withdraw_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("wait_withdraw"):
         return
 
-    # ===== СЛОТЫ =====
-    if q.data == "slots":
-        bet = 0.5
-        if bal(uid) < bet:
-            await q.message.reply_text("❌ Недостаточно средств")
-            return
-        sub(uid, bet)
-        res = random.choice(["🍋", "🍓", "777", "❌"])
-        mult = {"🍋": 1.5, "🍓": 1.7, "777": 2.2}
-        if res in mult:
-            win = round(bet * mult[res], 2)
-            add(uid, win)
-            await q.message.reply_text(f"🎰 {res}\n🎉 +{win}$")
-        else:
-            await q.message.reply_text("🎰 ❌ Проигрыш")
+    user = get_user(update.effective_user.id, update.effective_user.username)
+    try:
+        amount, wallet = update.message.text.split()
+        amount = float(amount)
+    except:
+        await update.message.reply_text("❌ Неверный формат")
         return
 
-    # ===== КУБИК =====
-    if q.data == "dice":
-        kb = [[
-            InlineKeyboardButton("Чёт", callback_data="dice_even"),
-            InlineKeyboardButton("Нечёт", callback_data="dice_odd")
-        ]]
-        user_state[uid] = {"bet": 0.5}
-        await q.message.reply_text("🎲 Ставка 0.5$ — выбери:", reply_markup=InlineKeyboardMarkup(kb))
+    if user["balance"] < amount:
+        await update.message.reply_text("❌ Недостаточно средств")
         return
 
-    if q.data.startswith("dice_"):
-        bet = user_state.get(uid, {}).get("bet", 0.5)
-        if bal(uid) < bet:
-            await q.message.reply_text("❌ Недостаточно средств")
-            return
-        sub(uid, bet)
-        roll = random.randint(1, 6)
-        even = roll % 2 == 0
-        win = (q.data == "dice_even" and even) or (q.data == "dice_odd" and not even)
-        if win:
-            prize = round(bet * 1.5, 2)
-            add(uid, prize)
-            await q.message.reply_text(f"🎲 Выпало {roll}\n🎉 +{prize}$")
-        else:
-            await q.message.reply_text(f"🎲 Выпало {roll}\n❌ Проигрыш")
+    user["balance"] -= amount
+    DB["withdraws"].append({
+        "user": user["username"],
+        "amount": amount,
+        "wallet": wallet
+    })
+    save_data()
+
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"📤 ВЫВОД\n@{user['username']}\nСумма: {amount}$\nКошелёк: {wallet}"
+    )
+
+    await update.message.reply_text("✅ Заявка отправлена")
+    context.user_data["wait_withdraw"] = False
+
+# ---------- СЛОТЫ ----------
+async def slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bet = 1.0
+    user = get_user(update.effective_user.id, update.effective_user.username)
+    if user["balance"] < bet:
+        await update.callback_query.message.reply_text("❌ Нет баланса")
         return
 
-    # ===== MINES =====
-    if q.data == "mines":
-        kb = [
-            [InlineKeyboardButton("🟦 5x5", callback_data="m_field_5")],
-            [InlineKeyboardButton("🟥 10x10", callback_data="m_field_10")]
-        ]
-        await q.message.reply_text("💣 Выбери поле:", reply_markup=InlineKeyboardMarkup(kb))
+    user["balance"] -= bet
+    symbols = ["🍋", "🍒", "7️⃣"]
+    spin = [random.choice(symbols) for _ in range(3)]
+
+    win = 0
+    if spin.count("🍋") == 3:
+        win = bet * 1.5
+    elif spin.count("🍒") == 3:
+        win = bet * 1.7
+    elif spin.count("7️⃣") == 3:
+        win = bet * 2.2
+
+    user["balance"] += win
+    save_data()
+
+    await update.callback_query.message.reply_text(
+        f"{' '.join(spin)}\n"
+        f"{'🎉 Выигрыш' if win else '😢 Проигрыш'} {win:.2f}$"
+    )
+
+# ---------- КУБИК ----------
+async def dice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bet = 1.0
+    user = get_user(update.effective_user.id, update.effective_user.username)
+    if user["balance"] < bet:
+        await update.callback_query.message.reply_text("❌ Нет баланса")
         return
 
-    if q.data.startswith("m_field_"):
-        size = int(q.data.split("_")[-1])
-        mines_games[uid] = {"size": size}
-        if size == 5:
-            options = [3, 5, 7]
-        else:
-            options = [3, 5, 10, 15]
-        kb = [[InlineKeyboardButton(f"{m} мин", callback_data=f"m_mines_{m}")] for m in options]
-        await q.message.reply_text("💣 Выбери количество мин:", reply_markup=InlineKeyboardMarkup(kb))
+    user["balance"] -= bet
+    roll = random.randint(1, 6)
+
+    win = bet * 1.5 if roll % 2 == 0 else 0
+    user["balance"] += win
+    save_data()
+
+    await update.callback_query.message.reply_text(
+        f"🎲 Выпало: {roll}\n"
+        f"{'✅ Выигрыш' if win else '❌ Проигрыш'} {win:.2f}$"
+    )
+
+# ---------- MINES ----------
+async def mines(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bet = 1.0
+    user = get_user(update.effective_user.id, update.effective_user.username)
+    if user["balance"] < bet:
+        await update.callback_query.message.reply_text("❌ Нет баланса")
         return
 
-    if q.data.startswith("m_mines_"):
-        mines = int(q.data.split("_")[-1])
-        mines_games[uid]["mines"] = mines
-        kb = [[InlineKeyboardButton(f"{b}$", callback_data=f"m_bet_{b}")] for b in BET_BUTTONS]
-        await q.message.reply_text("💰 Выбери ставку:", reply_markup=InlineKeyboardMarkup(kb))
-        return
+    user["balance"] -= bet
+    mines = random.randint(3, 6)
+    chance = max(0.2, 1 - mines * 0.15)
 
-    if q.data.startswith("m_bet_"):
-        bet = float(q.data.split("_")[-1])
-        if bal(uid) < bet:
-            await q.message.reply_text("❌ Недостаточно средств")
-            return
+    if random.random() < chance:
+        win = bet * 1.3
+    else:
+        win = 0
 
-        game = mines_games[uid]
-        size = game["size"]
-        mines = game["mines"]
-        total_cells = size * size
+    user["balance"] += win
+    save_data()
 
-        # Генерация мин
-        cells = list(range(total_cells))
-        mine_positions = set(random.sample(cells, mines))
+    await update.callback_query.message.reply_text(
+        f"💣 Mines: {mines}\n"
+        f"{'🎉 Победа' if win else '💥 Мина'} {win:.2f}$"
+    )
 
-        # Мягкий режим ТОЛЬКО при 3 минах
-        soft = (mines == 3 and random.random() < SOFT_MODE_CHANCE)
-
-        mines_games[uid].update({
-            "bet": bet,
-            "opened": set(),
-            "mine_positions": mine_positions,
-            "soft": soft,
-            "soft_left": SOFT_SAFE_CLICKS if soft else 0,
-            "active": True
-        })
-
-        sub(uid, bet)
-        await render_field(q.message, uid)
-        return
-
-    if q.data.startswith("m_cell_"):
-        idx = int(q.data.split("_")[-1])
-        game = mines_games.get(uid)
-        if not game or not game.get("active"):
-            return
-
-        if idx in game["opened"]:
-            return
-
-        # мягкий режим
-        if game["soft_left"] > 0:
-            game["soft_left"] -= 1
-            safe = True
-        else:
-            safe = idx not in game["mine_positions"]
-
-        game["opened"].add(idx)
-
-        if not safe:
-            game["active"] = False
-            await q.message.reply_text("💥 МИНА! Проигрыш.")
-            return
-
-        await render_field(q.message, uid)
-        return
-
-    if q.data == "m_cashout":
-        game = mines_games.get(uid)
-        if not game or not game.get("active"):
-            return
-        opened = len(game["opened"])
-        # простая шкала множителей
-        mult = 1 + opened * 0.25
-        win = round(game["bet"] * mult, 2)
-        add(uid, win)
-        game["active"] = False
-        await q.message.reply_text(f"💰 Забрал: {win}$ (x{round(mult,2)})")
-        return
-
-# ---------- RENDER MINES ----------
-async def render_field(msg, uid):
-    game = mines_games[uid]
-    size = game["size"]
-    kb = []
-    for r in range(size):
-        row = []
-        for c in range(size):
-            i = r * size + c
-            if i in game["opened"]:
-                row.append(InlineKeyboardButton("💎", callback_data="noop"))
-            else:
-                row.append(InlineKeyboardButton("⬜", callback_data=f"m_cell_{i}"))
-        kb.append(row)
-    kb.append([InlineKeyboardButton("💰 Забрать", callback_data="m_cashout")])
-    await msg.reply_text("💣 Mines:", reply_markup=InlineKeyboardMarkup(kb))
-
-# ---------- ADMIN ----------
-async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- АДМИН ----------
+async def add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    try:
-        uid = int(context.args[0])
-        amount = float(context.args[1])
-    except:
-        await update.message.reply_text("Используй: /add user_id сумма")
-        return
-    add(uid, amount)
-    await update.message.reply_text(f"✅ Начислено {amount}$ пользователю {uid}")
 
-# ---------- RUN ----------
-def main():
+    try:
+        username, amount = context.args
+        amount = float(amount)
+    except:
+        await update.message.reply_text("Используй: /add @user 10")
+        return
+
+    for u in DB["users"].values():
+        if u["username"] == username.replace("@", ""):
+            u["balance"] += amount
+            save_data()
+            await update.message.reply_text("✅ Баланс начислен")
+            return
+
+    await update.message.reply_text("❌ Пользователь не найден")
+
+# ---------- CALLBACK ----------
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+
+    if data == "balance":
+        await balance(update, context)
+    elif data == "deposit":
+        await deposit(update, context)
+    elif data == "withdraw":
+        await withdraw(update, context)
+    elif data == "slots":
+        await slots(update, context)
+    elif data == "dice":
+        await dice(update, context)
+    elif data == "mines":
+        await mines(update, context)
+
+# ---------- KEEP ALIVE ----------
+async def keep_alive():
+    while True:
+        await asyncio.sleep(60)
+
+# ---------- ЗАПУСК ----------
+async def main():
     app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add_cmd))
-    app.add_handler(CallbackQueryHandler(cb))
-    app.add_handler(MessageHandler(filters.TEXT, lambda *_: None))
-    print("Бот запущен")
-    app.run_polling()
+    app.add_handler(CommandHandler("add", add_balance))
+    app.add_handler(CallbackQueryHandler(callbacks))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_msg))
+
+    asyncio.create_task(keep_alive())
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
